@@ -2,11 +2,11 @@ CC=mpicc
 CFLAGS=-O2
 LDFLAGS=-lucp -luct -lucs -lucm 
 
-
 .PHONY: all clean
-all: wireup
+all: ucx_mr_bw
 
-wireup: wireup.c mpi.c 
+ucx_mr_bw: ucx.c mpi.c 
+	${CC} ${CFLAGS} -o $@ $^ ${LDFLAGS}
 
 clean:
-	rm wireup
+	rm ucx_mr_bw
