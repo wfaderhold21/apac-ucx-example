@@ -247,7 +247,7 @@ int cmpfunc(const void * a, const void * b)
     return ((*(double *)a) - (*(double *)b));
 }
 
-void put_lat(char * sdata, int iter, int warmup, size_t data_size)
+void bench(char * sdata, int iter, int warmup, size_t data_size)
 {
     double start, end;
     double bw = 0.0;
@@ -341,7 +341,7 @@ int main(void)
     }
 
     for (int i = 1; i <= 1024; i *= 2) {
-        put_lat(sdata, 100, 10, i);
+        bench(sdata, 100, 10, i);
     }
 
     comm_finalize();

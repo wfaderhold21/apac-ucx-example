@@ -1,8 +1,7 @@
 This is a simple message rate / bandwidth benchmark using UCX
 
 Prior to compiling or running, load the following modules:
-    gcc
-    hpcx
+    $ module load gcc hpcx
 
 To compile:
     $ make
