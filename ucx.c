@@ -255,23 +255,28 @@ void bench(char * sdata, int iter, int warmup, size_t data_size)
     ucp_request_param_t req_param = {0};
     ucs_status_ptr_t ucp_status;
 
-
     /* provide a warmup between endpoints */
     for (int i = 0; i < warmup; i++) {
+        ucs_status_ptr_t flush_req;
+
         if (my_pe == 0) {
             ucp_status = ucp_put_nbx(endpoints[1], &sdata[i * data_size], data_size, remote_addresses[1] + i * data_size, rkeys[1], &req_param);
         } else {
             ucp_status = ucp_put_nbx(endpoints[0], &sdata[i * data_size], data_size, remote_addresses[0] + i * data_size, rkeys[0], &req_param);
         }
         if (UCS_OK != ucp_status) {
-            if (UCS_PTR_IS_ERR(ucp_status)) {
-                abort();
-            } else {
-                while (UCS_INPROGRESS == ucp_request_check_status(ucp_status)) {
-                    ucp_worker_progress(ucp_worker);
+            flush_req = ucp_worker_flush_nbx(ucp_worker, &req_param);
+            if (UCS_OK != flush_req) {
+                if (UCS_PTR_IS_ERR(flush_req)) {
+                    abort();
+                } else {
+                    while (UCS_INPROGRESS == ucp_request_check_status(flush_req)) {
+                        ucp_worker_progress(ucp_worker);
+                    }
+                    ucp_request_free(flush_req);
                 }
-                ucp_request_free(ucp_status);
             }
+            ucp_request_free(ucp_status);
         }
     }
 
