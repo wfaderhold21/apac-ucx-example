@@ -201,7 +201,7 @@ void create_mpi_datatype(void)
     /* MPI Datatype for ucp worker address exchange */
     int worker_nr_items = 2;
     MPI_Aint worker_displacements[2];
-    int worker_block_lengths[2] = {1, 600};
+    int worker_block_lengths[2] = {1, 800};
     MPI_Datatype worker_exchange_types[2] = {MPI_UINT64_T, MPI_BYTE};
 
     buffer_displacements[0] = offsetof(struct data_exchange, pack_size);

@@ -14,7 +14,7 @@ struct data_exchange {
 
 struct worker_exchange {
     size_t worker_len;
-    char worker[600];
+    char worker[800];
 };
 
 extern ucp_context_h ucp_context;
