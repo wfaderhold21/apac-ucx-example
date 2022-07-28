@@ -9,12 +9,6 @@
 struct data_exchange {
     size_t pack_size;
     uint64_t remote;
-    char pack[600]; 
-};
-
-struct worker_exchange {
-    size_t worker_len;
-    char worker[800];
 };
 
 extern ucp_context_h ucp_context;

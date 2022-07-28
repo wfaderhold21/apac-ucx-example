@@ -12,14 +12,23 @@
 #include "common.h"
 
 ucp_context_h ucp_context;
-ucp_worker_h ucp_worker;
-ucp_ep_h * endpoints;
-ucp_rkey_h * rkeys;
-ucp_mem_h register_buffer;
-uint64_t * remote_addresses;
+ucp_worker_h  ucp_worker;
+ucp_ep_h     *endpoints;
+ucp_rkey_h   *rkeys;
+ucp_mem_h     register_buffer;
+uint64_t     *remote_addresses;
+int           my_pe;
+int           size;
 
-int my_pe;
-int size;
+int cmpfunc(const void * a, const void * b)
+{
+    return ((*(double *)a) - (*(double *)b));
+}
+
+static inline void barrier()
+{
+    MPI_Barrier(MPI_COMM_WORLD);
+}
 
 double TIME()
 {
@@ -34,7 +43,6 @@ double TIME()
     return retval;
 }
 
-
 /* 
  * This will exchange networking information with all other PEs and 
  * register an allocated buffer with the local NIC. Will create endpoints 
@@ -42,9 +50,9 @@ double TIME()
  */
 int reg_buffer(void * buffer, size_t length)
 {
-    int i = 0;
-    int error = 0;
-    void ** pack = NULL;
+    int        i = 0;
+    int    error = 0;
+    void  **pack = NULL;
     ucs_status_t status;
     ucp_mem_map_params_t mem_map_params;
 
@@ -108,16 +116,16 @@ fail_endpoints:
 fail:
     free(rkeys);
 
-    register_buffer = NULL;
-    rkeys = NULL;
+    register_buffer  = NULL;
+    rkeys            = NULL;
     remote_addresses = NULL;
 
     return error;
 }
 
 /*
- * This function creates the ucp endpoints used for communication by SharP.
- * This leverages MPI to perform the data exchange
+ * This function creates the ucp endpoints used for communication.
+ * This leverages MPI to perform the data exchange.
  */
 static inline int create_ucp_endpoints(void)
 {
@@ -167,7 +175,7 @@ int comm_init()
         return -1;
     }
 
-    ucp_params.features = UCP_FEATURE_RMA | UCP_FEATURE_AMO64 | UCP_FEATURE_AMO32;
+    ucp_params.features   = UCP_FEATURE_RMA | UCP_FEATURE_AMO64 | UCP_FEATURE_AMO32;
     ucp_params.field_mask = UCP_PARAM_FIELD_FEATURES;
 
     status = ucp_init(&ucp_params, config, &ucp_context);
@@ -195,14 +203,6 @@ int comm_init()
     } 
 
     return 0;
-}
-/******************************/
-
-
-
-void barrier()
-{
-    MPI_Barrier(MPI_COMM_WORLD);
 }
 
 int comm_finalize()
@@ -240,12 +240,8 @@ int comm_finalize()
     ucp_cleanup(ucp_context);
 
     finalize_mpi();
+    return 0;
 }   
-
-int cmpfunc(const void * a, const void * b) 
-{
-    return ((*(double *)a) - (*(double *)b));
-}
 
 void bench(char * sdata, int iter, int warmup, size_t data_size)
 {
@@ -283,10 +279,14 @@ void bench(char * sdata, int iter, int warmup, size_t data_size)
     barrier();
     /* TODO: change this code to perform ping-pong latency */
     if (my_pe == 0) {
-        int j = 0;
         start = MPI_Wtime();
-        for (int i = 0; i < iter; i++) {
-            ucp_status = ucp_put_nbx(endpoints[1], &sdata[i * data_size], data_size, remote_addresses[1] + i * data_size, rkeys[1], &req_param);
+        for (int i = 0, offset = 0; i < iter; i++, offset += data_size) {
+            ucp_status = ucp_put_nbx(endpoints[1],
+                                    &sdata[offset],
+                                     data_size,
+                                     remote_addresses[1] + offset,
+                                     rkeys[1],
+                                    &req_param);
             if (UCS_PTR_IS_PTR(ucp_status)) {
                 ucp_request_free(ucp_status);
             } 
@@ -305,24 +305,21 @@ void bench(char * sdata, int iter, int warmup, size_t data_size)
         end = MPI_Wtime();
 
         total = iter / (end - start);
-        bw = (1.0 * iter * data_size) / (end - start);
+        bw = ((1.0 * iter * data_size) / (1024 * 1024)) / (end - start);
 
         printf("%-10ld", data_size);
-        printf("%15.2f", ((end - start) * 1e6) / iter);
         printf("%15.2f", total);
-        printf("%15.2f", bw / (1024 * 1024));
+        printf("%15.2f", bw);
         printf("\n");
     }
     barrier();
 }
-
 
 int main(void) 
 {
     void * mybuff;
     char * shared_ptr;
     char * sdata;
-    ucp_request_param_t req_param;
     
     /* initialize the runtime and communication components */
     comm_init();
@@ -334,7 +331,7 @@ int main(void)
     /* register memory  */
     reg_buffer(mybuff, HUGEPAGE);
     
-    shared_ptr = (char *) mybuff;
+    shared_ptr = (char *)mybuff;
 
     for (int i = 0; i < HUGEPAGE; i++) {
         shared_ptr[i] = (char) i;
@@ -342,11 +339,11 @@ int main(void)
     barrier();
 
     if (my_pe == 0) {
-        printf("%-10s%15s%15s%15s\n", "Size", "Latency us", "Msg/s", "BW MB/s");
+        printf("%-10s%15s%15s\n", "Size", "Msg/s", "BW MB/s");
     }
 
     for (int i = 1; i <= 1024; i *= 2) {
-        bench(sdata, 100, 10, i);
+        bench(sdata, 1024, 10, i);
     }
 
     comm_finalize();

@@ -9,18 +9,18 @@
 #include "errors.h"
 #include "common.h"
 
-MPI_Datatype mpi_worker_exchange_dt;
 MPI_Datatype mpi_buffer_exchange_dt; 
 
 int mpi_worker_exchange(void *** param_worker_addrs)
 {
-    struct worker_exchange * rx;
-    struct worker_exchange * dx;
     void ** worker_addresses;
     size_t worker_len;
     void * worker_address;
+    size_t * worker_sizes;
     int error;
     int i;
+    void * buf, * w_addr;
+    size_t max = 0;
     int ret = 0;
 
     /* allocate */
@@ -33,55 +33,62 @@ int mpi_worker_exchange(void *** param_worker_addrs)
     error = ucp_worker_get_address(ucp_worker,
                                    (ucp_address_t **) &worker_address,
                                    &worker_len);
-    if(error < 0) {
+    if (error < 0) {
         free(worker_addresses);
         return -1;
     }
 
-    /* pack */
-    rx = (struct worker_exchange *) 
-        malloc(sizeof(struct worker_exchange) * size);
-    if (NULL == rx) {
-        ret = ERR_NO_MEMORY;
-        goto fail_pack;
-    }
-
-    dx = (struct worker_exchange *) malloc(sizeof(struct worker_exchange));
-    if (NULL == dx) {
-        ret = ERR_NO_MEMORY;
-        free(rx);
-        goto fail_pack;
-    }
-
-    dx->worker_len = worker_len;
-    memcpy(&dx->worker, worker_address, worker_len);
+    worker_sizes = (size_t *) malloc(sizeof(size_t) * size);
+    worker_sizes[my_pe] = worker_len;
 
     /* exchange */
-    error = MPI_Allgather(dx,
+    error = MPI_Allgather(&worker_sizes[my_pe],
                           1,
-                          mpi_worker_exchange_dt,
-                          rx,
+                          MPI_UNSIGNED_LONG,
+                          worker_sizes,
                           1,
-                          mpi_worker_exchange_dt,
+                          MPI_UNSIGNED_LONG,
                           MPI_COMM_WORLD);
     if (error != MPI_SUCCESS) {
         ret = -1;
         goto fail_exchange;
     }
 
+    for (int j = 0; j < size; j++) {
+        if (max < worker_sizes[j]) {
+            max = worker_sizes[j];
+        }
+    }
+
     /* set up */
     for (i = 0; i < size; i++) {
-        worker_addresses[i] = malloc(rx[i].worker_len);
+        worker_addresses[i] = malloc(worker_sizes[i]);
         if (NULL == worker_addresses[i]) {
             ret = ERR_NO_MEMORY;
             goto fail_setup;
         }
+    }
+    buf = malloc(max * size);
 
-        memcpy(worker_addresses[i], rx[i].worker, rx[i].worker_len);        
+    w_addr = malloc(max);
+    memcpy(w_addr, worker_address, worker_len);
+    error = MPI_Allgather(w_addr,
+                          max,
+                          MPI_BYTE,
+                          buf,
+                          max,
+                          MPI_BYTE,
+                          MPI_COMM_WORLD);
+    if (error != MPI_SUCCESS) {
+        ret = -1;
+        goto fail_setup;
     }
 
-    free(dx);
-    free(rx);
+    for (int i = 0; i < size; i++) {
+        memcpy(worker_addresses[i], buf + (max * i), worker_sizes[i]);
+    }
+    free(buf);
+
     *param_worker_addrs = worker_addresses;
     
     return ret;
@@ -91,9 +98,7 @@ fail_setup:
         free(worker_addresses[i]);
     }
 fail_exchange:
-    free(rx);
-    free(dx);
-fail_pack:
+    free(worker_sizes);
     free(worker_addresses);
     free(endpoints);
 
@@ -113,8 +118,11 @@ int mpi_buffer_exchange(void * buffer,
     size_t pack_size; 
     int ret = 0, i;
     ucs_status_t status;
+    void * buf;
+    void * packed_rkey;
+    size_t max = 0;
 
-    pack = (void **) malloc(sizeof(void *)*size);
+    pack = (void **) malloc(sizeof(void *) * size);
     if (NULL == pack) {
         ret = ERR_NO_MEMORY;
         goto fail_mpi;
@@ -128,19 +136,12 @@ int mpi_buffer_exchange(void * buffer,
     }
 
     remotes[my_pe] = (uint64_t)buffer;
-/*
-    TODO:
-1. I need to pack all of my data into a buffer, preferably a MPI_Datatype
-2. I need to perform a mpi_allgather() on the data
-3. I need to loop through the data and pull out the necessary parts
-*/
 
-    /* step 1: create a data type */
+    /* step 1: create some storage */
     rx = (struct data_exchange *)malloc(
-                                    sizeof(struct data_exchange)*size);
+                                    sizeof(struct data_exchange) * size);
     dx = (struct data_exchange *)malloc(sizeof(struct data_exchange));
     dx->pack_size = pack_size;
-    memcpy(&dx->pack, pack[my_pe], pack_size);
     dx->remote = remotes[my_pe];
 
     /* step 2: perform the allgather on the data */
@@ -152,25 +153,44 @@ int mpi_buffer_exchange(void * buffer,
                   mpi_buffer_exchange_dt, 
                   MPI_COMM_WORLD);
 
-
+    max = pack_size;
     /* step 3: loop over rx and pull out the necessary parts */ 
-    /* obtain the network information here... */
     for (i = 0; i < size; i++) {
         if (i == my_pe) {
             continue;
         }
-        /*FIXME: i'm ignoring the worker length and pack size */
+        /* store remote address */
         remotes[i] = rx[i].remote;
+        if (max < rx[i].pack_size) {
+            max = rx[i].pack_size;
+        }
+    }
+    buf = malloc(max * size);
+    packed_rkey = malloc(max);
+    memcpy(packed_rkey, pack[my_pe], pack_size);
+
+    MPI_Allgather(packed_rkey,
+                  max,
+                  MPI_BYTE,
+                  buf,
+                  max,
+                  MPI_BYTE,
+                  MPI_COMM_WORLD);
+    for (i = 0; i < size; i++) {
+        /* allocate space for packed rkeys */
         pack[i] = malloc(rx[i].pack_size);
         if (NULL == pack[i]) {
             ret = ERR_NO_MEMORY;
             goto fail_purge_arrays;
         }
-        memcpy(pack[i], rx[i].pack, pack_size);
+        /* copy remote rkey into pack */
+        memcpy(pack[i], buf + (max * i), pack_size);
     }
-    
+    free(buf);
+    free(packed_rkey);
     free(rx);
     free(dx);
+
     *pack_param = pack; 
 
     return ret;
@@ -191,25 +211,14 @@ fail_mpi:
 
 void create_mpi_datatype(void)
 {
-    int buffer_nr_items = 3;
-    MPI_Aint buffer_displacements[3];
-    int buffer_block_lengths[3] = {1,1,600};
-    MPI_Datatype buffer_exchange_types[3] = {MPI_UINT64_T,
-                                             MPI_UINT64_T,
-                                             MPI_BYTE};
-
-    /* MPI Datatype for ucp worker address exchange */
-    int worker_nr_items = 2;
-    MPI_Aint worker_displacements[2];
-    int worker_block_lengths[2] = {1, 800};
-    MPI_Datatype worker_exchange_types[2] = {MPI_UINT64_T, MPI_BYTE};
+    int buffer_nr_items = 2;
+    MPI_Aint buffer_displacements[2];
+    int buffer_block_lengths[2] = {1,1};
+    MPI_Datatype buffer_exchange_types[2] = {MPI_UINT64_T,
+                                             MPI_UINT64_T};
 
     buffer_displacements[0] = offsetof(struct data_exchange, pack_size);
     buffer_displacements[1] = offsetof(struct data_exchange, remote);
-    buffer_displacements[2] = offsetof(struct data_exchange, pack);
-
-    worker_displacements[0] = offsetof(struct worker_exchange, worker_len);
-    worker_displacements[1] = offsetof(struct worker_exchange, worker);        
 
     /* create an exchange data type for group creation/buffer registration */
     MPI_Type_create_struct(buffer_nr_items, 
@@ -218,14 +227,6 @@ void create_mpi_datatype(void)
                            buffer_exchange_types, 
                            &mpi_buffer_exchange_dt);
     MPI_Type_commit(&mpi_buffer_exchange_dt);
-
-    /* create an exchange data type for UCP worker information exchange */
-    MPI_Type_create_struct(worker_nr_items,
-                           worker_block_lengths,
-                           worker_displacements,
-                           worker_exchange_types,
-                           &mpi_worker_exchange_dt);
-    MPI_Type_commit(&mpi_worker_exchange_dt);
 }
 
 int init_mpi(void)
@@ -239,7 +240,7 @@ int init_mpi(void)
 
 int finalize_mpi(void)
 {
-    MPI_Type_free(&mpi_worker_exchange_dt);
     MPI_Type_free(&mpi_buffer_exchange_dt);
     MPI_Finalize();
+    return 0;
 }
